@@ -8,6 +8,13 @@ import itertools
 import requests
 from collections import deque
 
+##
+## TODO list:
+## 1. Add slippage and transaction costs
+## 2. Produce presentable panel of summary statistics and visualizations
+## 3. Refactor code into modular functions
+##
+
 start_date = '2015-01-01'
 end_date = '2024-11-01'
 url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
