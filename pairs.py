@@ -10,9 +10,8 @@ from collections import deque
 
 ##
 ## TODO list:
-## 1. Add slippage and transaction costs
-## 2. Produce presentable panel of summary statistics and visualizations
-## 3. Refactor code into modular functions
+## 1. Produce presentable panel of summary statistics and visualizations
+## 2. Refactor code into modular functions
 ##
 
 start_date = '2015-01-01'
@@ -51,6 +50,8 @@ prev_position = {}
 ENTRY_Z = 2.5
 EXIT_Z = 0.25
 CAPITAL_PER_PAIR = 10000
+SLIPPAGE_RATE = 0.0002
+TRANSACTION_COST = 0.0005
 
 def compute_spread(stockA, stockA_price, stockB, stockB_price):
     spread = stockA_price - hedge_dict[(stockA,stockB)] * stockB_price
@@ -123,12 +124,12 @@ for i in range(2,prices.shape[0]):
         spread_prev = priceA_prev - hedge * priceB_prev
         spread_now = priceA_now - hedge * priceB_now
         
-        side = {'long': 1, 'short': -1}.get(
+        old_side = {'long': 1, 'short': -1}.get(
             prev_position.get((stockA, stockB), {}).get('side'),
             0
         )
         notional = priceA_prev + abs(hedge)*priceB_prev
-        pnl = ((side * (spread_now - spread_prev)) / notional) * CAPITAL_PER_PAIR
+        pnl = ((old_side * (spread_now - spread_prev)) / notional) * CAPITAL_PER_PAIR
         
         if (stockA, stockB) in historical:
             window, sum_x, sum_x2 = historical[(stockA, stockB)]
@@ -144,13 +145,22 @@ for i in range(2,prices.shape[0]):
     
         act_on_it(stockA, stockB, z)
         
+        new_side = {'long': 1, 'short': -1}.get(
+            prev_position.get((stockA, stockB), {}).get('side'),
+            0
+        )
+        
+        if new_side != old_side:
+            cost = (SLIPPAGE_RATE + TRANSACTION_COST) * CAPITAL_PER_PAIR
+            pnl -= cost
+        
         update_window(stockA, stockB, spread_prev)
 
         returns_list.append({
             'date': prices.index[i],
             'pair': (stockA, stockB),
             'pnl': pnl,
-            'side': side
+            'side': old_side
         })
 
 
