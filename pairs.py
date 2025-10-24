@@ -11,47 +11,46 @@ from collections import deque
 ##
 ## TODO list:
 ## 1. Produce presentable panel of summary statistics and visualizations
-## 2. Refactor code into modular functions
+## 2. Parallelize
+## 3. Improve console GUI
 ##
 
-start_date = '2015-01-01'
-end_date = '2024-11-01'
+
 url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-
 headers = {'User-Agent':'Mozilla/5.0'}
-response = requests.get(url, headers=headers)
-table = pd.read_html(response.text)
-tickers = table[0]['Symbol'].to_list()
-tickers = [t.replace('.', '-') for t in tickers]
-
-data = yf.download(tickers, start=start_date, end=end_date)
-prices = data['Close'].dropna(axis=1).drop(columns=['GOOG'])
-returns = np.log(prices / prices.shift(1)).dropna()
-corr = returns.corr()
-
-pairs = [(a,b) 
-         for a,b in itertools.combinations(prices.columns, 2) 
-         if abs(corr.loc[a,b])>0.85]
-pairs = [(a,b) 
-         for a,b in pairs
-         if coint(prices[a],prices[b])[1] < 0.05]
-
-print(len(pairs))
-
-hedge_dict = {}
-for stockA,stockB in pairs:
-    hedge_ratio = np.cov(prices[stockA],prices[stockB])[0,1] / np.var(prices[stockB])
-    hedge_dict[(stockA,stockB)] = hedge_ratio
-    
 window_size = 100
 t = 200
-historical = {}
-prev_position = {}
 ENTRY_Z = 2.5
 EXIT_Z = 0.25
-CAPITAL_PER_PAIR = 10000
 SLIPPAGE_RATE = 0.0002
 TRANSACTION_COST = 0.0005
+hedge_dict = {}
+historical = {}
+prev_position = {}
+returns_list = []
+
+
+def pull_data(start_date, end_date):
+    response = requests.get(url, headers=headers)
+    table = pd.read_html(response.text)
+    tickers = table[0]['Symbol'].to_list()
+    tickers = [t.replace('.', '-') for t in tickers]
+    data = yf.download(tickers, start=start_date, end=end_date)
+    
+    prices = data['Close'].dropna(axis=1).drop(columns=['GOOG'])
+    returns = np.log(prices / prices.shift(1)).dropna()
+    corr = returns.corr()
+    return prices, corr
+
+
+def find_pairs(prices, corr):
+    pairs = [(a,b) for a,b in itertools.combinations(prices.columns, 2) if abs(corr.loc[a,b])>0.85]
+    pairs = [(a,b) for a,b in pairs if coint(prices[a],prices[b])[1] < 0.05]
+    
+    for stockA,stockB in pairs:
+        hedge_ratio = np.cov(prices[stockA],prices[stockB])[0,1] / np.var(prices[stockB])
+        hedge_dict[(stockA,stockB)] = hedge_ratio
+    return pairs
 
 def compute_spread(stockA, stockA_price, stockB, stockB_price):
     spread = stockA_price - hedge_dict[(stockA,stockB)] * stockB_price
@@ -112,60 +111,75 @@ def act_on_it(stockA,stockB,z):
 ## Day 5: 8   d(spread)=6-3, PnL=posY*d(spread), !!!window=[4,5,3], check 6 w/ window, take posZ, add 6 to window!!!
 ##
 
-returns_list = []
-for i in range(2,prices.shape[0]):
-    for stockA, stockB in pairs:
-        hedge = hedge_dict[(stockA, stockB)]
-        priceA_prev = prices.iloc[i-1][stockA]
-        priceB_prev = prices.iloc[i-1][stockB]
-        priceA_now  = prices.iloc[i][stockA]
-        priceB_now  = prices.iloc[i][stockB]
-
-        spread_prev = priceA_prev - hedge * priceB_prev
-        spread_now = priceA_now - hedge * priceB_now
-        
-        old_side = {'long': 1, 'short': -1}.get(
-            prev_position.get((stockA, stockB), {}).get('side'),
-            0
-        )
-        notional = priceA_prev + abs(hedge)*priceB_prev
-        pnl = ((old_side * (spread_now - spread_prev)) / notional) * CAPITAL_PER_PAIR
-        
-        if (stockA, stockB) in historical:
-            window, sum_x, sum_x2 = historical[(stockA, stockB)]
-            n = len(window)
-            if n > 1:
-                mu = sum_x / n
-                sd = np.sqrt((sum_x2/n - mu**2)* n/(n-1))
-            else:
-                mu, sd = 0, 0
-        else:
-            mu, sd = 0, 0    
-        z = check_spread_deviation(mu, sd, spread_prev)
+def run_pairs(prices, pairs, initial_capital):
+    capital_per_pair = initial_capital / len(pairs)
     
-        act_on_it(stockA, stockB, z)
-        
-        new_side = {'long': 1, 'short': -1}.get(
-            prev_position.get((stockA, stockB), {}).get('side'),
-            0
-        )
-        
-        if new_side != old_side:
-            cost = (SLIPPAGE_RATE + TRANSACTION_COST) * CAPITAL_PER_PAIR
-            pnl -= cost
-        
-        update_window(stockA, stockB, spread_prev)
+    for i in range(2,prices.shape[0]):
+        for stockA, stockB in pairs:
+            hedge = hedge_dict[(stockA, stockB)]
+            priceA_prev = prices.iloc[i-1][stockA]
+            priceB_prev = prices.iloc[i-1][stockB]
+            priceA_now  = prices.iloc[i][stockA]
+            priceB_now  = prices.iloc[i][stockB]
 
-        returns_list.append({
-            'date': prices.index[i],
-            'pair': (stockA, stockB),
-            'pnl': pnl,
-            'side': old_side
-        })
+            spread_prev = priceA_prev - hedge * priceB_prev
+            spread_now = priceA_now - hedge * priceB_now
+        
+            old_side = {'long': 1, 'short': -1}.get(
+                prev_position.get((stockA, stockB), {}).get('side'),
+                0
+            )
+            notional = priceA_prev + abs(hedge)*priceB_prev
+            pnl = ((old_side * (spread_now - spread_prev)) / notional) * capital_per_pair
+        
+            if (stockA, stockB) in historical:
+                window, sum_x, sum_x2 = historical[(stockA, stockB)]
+                n = len(window)
+                if n > 1:
+                    mu = sum_x / n
+                    sd = np.sqrt((sum_x2/n - mu**2)* n/(n-1))
+                else:
+                    mu, sd = 0, 0
+            else:
+                mu, sd = 0, 0    
+            z = check_spread_deviation(mu, sd, spread_prev)
+    
+            act_on_it(stockA, stockB, z)
+        
+            new_side = {'long': 1, 'short': -1}.get(
+                prev_position.get((stockA, stockB), {}).get('side'),
+                0
+            )
+        
+            if new_side != old_side:
+                cost = (SLIPPAGE_RATE + TRANSACTION_COST) * capital_per_pair
+                pnl -= cost
+        
+            update_window(stockA, stockB, spread_prev)
 
+            returns_list.append({
+                'date': prices.index[i],
+                'pair': (stockA, stockB),
+                'pnl': pnl,
+                'side': old_side
+            })
+    return returns_list
 
-returns_df = pd.DataFrame(returns_list)
-daily_pnl = returns_df.groupby('date')['pnl'].sum()
-print(daily_pnl.mean())
-print(daily_pnl.cumsum().plot(title="Cumulative mean PnL"))
-plt.show()
+def run():
+    start_date = input('Input start date (YYYY-MM-DD): ')
+    end_date = input('Input end date (YYYY-MM-DD): ')
+    prices,corr = pull_data(start_date,end_date)
+    pairs = find_pairs(prices,corr)
+    
+    initial_capital = float(input('Input initial invested capital: '))
+    returns_list = run_pairs(prices, pairs, initial_capital)
+    
+    returns_df = pd.DataFrame(returns_list)
+    daily_pnl = returns_df.groupby('date')['pnl'].sum()
+    print(daily_pnl.mean())
+    print(daily_pnl.cumsum().plot(title="Cumulative mean PnL"))
+    plt.show()
+    
+    
+if __name__ == '__main__':
+    run()
